@@ -72,12 +72,37 @@ def _is_cookie_expired(cookie: dict[str, Any]) -> bool:
     return time.time() > expires
 
 
+def _is_reese84_cookie_valid(state: dict[str, Any]) -> bool:
+    """Check for a valid reese84 *cookie* (as opposed to localStorage token).
+
+    Sessions harvested directly from Chrome carry reese84 as an HTTP cookie with
+    a normal ``expires`` field rather than a localStorage JSON blob with a
+    ``renewTime``. HEB's WAF accepts these cookies when replayed, so a present,
+    unexpired reese84 cookie on an ``*.heb.com`` domain counts as valid.
+
+    Args:
+        state: Playwright storage state dict with a 'cookies' list
+
+    Returns:
+        True if a non-expired reese84 cookie exists for heb.com, else False
+    """
+    for cookie in state.get("cookies", []):
+        if (
+            cookie.get("name") == "reese84"
+            and "heb.com" in cookie.get("domain", "")
+            and not _is_cookie_expired(cookie)
+        ):
+            return True
+    return False
+
+
 def _is_reese84_valid(state: dict[str, Any]) -> bool:
     """Check if reese84 bot detection token is present and not expired.
 
-    The reese84 token is stored in localStorage and contains a renewTime
-    that indicates when the token expires. HEB's WAF rejects requests
-    with expired tokens.
+    The reese84 token may be stored either in localStorage (as a JSON blob with
+    a ``renewTime``, the format Playwright saves) or as an HTTP cookie (the
+    format produced when extracting cookies straight from Chrome). HEB's WAF
+    rejects requests with expired tokens, so we validate whichever is present.
 
     Args:
         state: Playwright storage state dict with 'origins' containing localStorage
@@ -87,12 +112,9 @@ def _is_reese84_valid(state: dict[str, Any]) -> bool:
     """
     # Extract localStorage from origins
     origins = state.get("origins", [])
-    if not origins:
-        return False
+    local_storage = origins[0].get("localStorage", []) if origins else []
 
-    local_storage = origins[0].get("localStorage", [])
-
-    # Find reese84 token
+    # Find reese84 token in localStorage
     reese84_data: dict[str, Any] | None = None
     for item in local_storage:
         if item.get("name") == "reese84":
@@ -101,7 +123,8 @@ def _is_reese84_valid(state: dict[str, Any]) -> bool:
             break
 
     if not reese84_data:
-        return False
+        # No localStorage token -- fall back to the reese84 cookie (Chrome path).
+        return _is_reese84_cookie_valid(state)
 
     # Check expiration via renewTime (absolute timestamp in milliseconds)
     renew_time_ms = reese84_data.get("renewTime")
@@ -552,7 +575,32 @@ def get_session_status() -> SessionStatus:
     expires_at: str | None = None
     needs_refresh = True
     refresh_recommended = True
-    reese84_present = reese84_data is not None
+
+    # reese84 may live in localStorage (Playwright) or as a cookie (Chrome sync).
+    reese84_cookie: dict[str, Any] | None = next(
+        (
+            c
+            for c in auth_data.get("cookies", [])
+            if c.get("name") == "reese84" and "heb.com" in c.get("domain", "")
+        ),
+        None,
+    )
+    reese84_present = reese84_data is not None or reese84_cookie is not None
+
+    if not reese84_data and reese84_cookie is not None:
+        # Chrome-sourced session: derive lifecycle from the cookie's expiry.
+        cookie_expires = reese84_cookie.get("expires", -1)
+        now = time.time()
+        if cookie_expires == -1:
+            # Session cookie with no explicit expiry -- treat as healthy.
+            time_remaining_hours = SESSION_REFRESH_THRESHOLD_HOURS + 1
+            needs_refresh = False
+            refresh_recommended = False
+        else:
+            time_remaining_hours = (cookie_expires - now) / 3600
+            expires_at = datetime.fromtimestamp(cookie_expires, tz=UTC).isoformat()
+            needs_refresh = time_remaining_hours <= 0
+            refresh_recommended = time_remaining_hours < SESSION_REFRESH_THRESHOLD_HOURS
 
     if reese84_data:
         # reese84 has renewTime (Unix ms) or renewInSec

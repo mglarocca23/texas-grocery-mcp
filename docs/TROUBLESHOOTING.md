@@ -15,13 +15,46 @@ This guide covers common issues and their solutions when using the Texas Grocery
 
 ## Session & Authentication Issues
 
+### Recommended: sync your session from Chrome
+
+**The fastest, most reliable way to authenticate.** HEB's WAF (Imperva) blocks
+headless browsers, so the embedded `session_refresh` headless path returns
+HTTP 401 and never populates the auth file. If you are already logged into
+heb.com in Google Chrome, sync that session directly instead:
+
+```
+1. Call session_sync_from_chrome()        # auto-detects your logged-in profile
+2. session_status should now show authenticated: true
+```
+
+If you have multiple Chrome profiles and the wrong account is picked, pass a
+profile name (display name or directory name):
+
+```
+session_sync_from_chrome(profile="Profile 1")
+```
+
+Notes:
+- Requires Google Chrome with a profile logged into heb.com.
+- On macOS you may get a one-time Keychain prompt to allow reading
+  "Chrome Safe Storage". Allow it.
+- No browser window opens and no login flow runs — it only reads and decrypts
+  cookies you already have. The synced `reese84` token is accepted by HEB's
+  WAF when replayed, so cart/coupon/product tools work immediately.
+
 ### "Session expired" / "needs_refresh: true"
 
 **Symptoms:**
 - `session_status` shows `authenticated: false` or `needs_refresh: true`
 - Operations return "Login required" errors
 
-**Solution:**
+**Solution (recommended):**
+```
+1. Call session_sync_from_chrome()  (you must be logged into heb.com in Chrome)
+2. session_status should now show authenticated: true
+```
+
+**Solution (fallback, if not logged into Chrome):**
 ```
 1. Call session_refresh(headless=False)
 2. Complete login in the browser window that opens

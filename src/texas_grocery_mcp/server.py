@@ -31,6 +31,7 @@ from texas_grocery_mcp.tools.session import (
     session_save_credentials,
     session_save_instructions,
     session_status,
+    session_sync_from_chrome,
 )
 from texas_grocery_mcp.tools.store import (
     store_change,
@@ -105,8 +106,23 @@ This MCP requires an authenticated HEB.com session for most operations.
 
 ### Before using cart, coupon, or store_change tools:
 1. Call `session_status` to check authentication state
-2. If `authenticated: false` or `needs_refresh: true`, call `session_refresh`
-3. If session_refresh fails with headless mode, retry with `headless=False` for manual login
+2. If `authenticated: false` or `needs_refresh: true`, call `session_sync_from_chrome`
+   (recommended) to harvest your existing login from Chrome — no browser
+   automation, and it bypasses HEB's bot detection.
+3. If you are not logged into HEB in Chrome, fall back to `session_refresh`.
+   If headless mode fails, retry with `headless=False` for manual login.
+
+### Recommended authentication: `session_sync_from_chrome`
+HEB's WAF (Imperva) blocks headless browsers, so the old `session_refresh`
+headless path returns HTTP 401. Instead, `session_sync_from_chrome` reads the
+session cookies you already have from being logged into heb.com in Google
+Chrome, decrypts them via the OS keystore, and writes them to the auth file.
+- Call it with no arguments first (auto-detects the logged-in profile).
+- If the wrong account is picked, pass a profile name, e.g.
+  `session_sync_from_chrome(profile="Profile 1")` or the display name shown in
+  the `profiles` field of the result.
+- On macOS you may see a one-time Keychain prompt to allow reading
+  "Chrome Safe Storage".
 
 ### Session states:
 - `authenticated: true, needs_refresh: false` → Ready to use all tools
@@ -118,7 +134,8 @@ This MCP requires an authenticated HEB.com session for most operations.
 - `product_search` / `product_search_batch` - Search products (uses local store default)
 - `product_get` - Get detailed product info (ingredients, nutrition, warnings)
 - `session_status` - Check session state
-- `session_refresh` - Refresh/login
+- `session_sync_from_chrome` - Sync session from your real Chrome browser (recommended)
+- `session_refresh` - Refresh/login via embedded browser (fallback)
 
 ### Tools that REQUIRE authentication:
 - `store_change` - Change store on HEB.com account
@@ -192,6 +209,7 @@ mcp.tool(annotations={"destructiveHint": True})(cart_remove)
 # Register session tools
 mcp.tool(annotations={"readOnlyHint": True})(session_status)
 mcp.tool(annotations={"readOnlyHint": True})(session_save_instructions)
+mcp.tool()(session_sync_from_chrome)  # Primary auth: harvest cookies from real Chrome
 mcp.tool()(session_refresh)  # Uses embedded Playwright when available, falls back to commands
 mcp.tool()(session_clear)
 mcp.tool()(session_save_credentials)  # Store HEB credentials for auto-login

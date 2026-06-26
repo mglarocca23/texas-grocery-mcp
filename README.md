@@ -21,34 +21,42 @@
 | 🛒 **Cart Management** | Add/remove items with human-in-the-loop confirmation |
 | 📋 **Product Details** | Ingredients, nutrition facts, allergens, warnings |
 | 🎟️ **Digital Coupons** | List, search, and clip coupons to save money |
-| 🔄 **Auto Session Refresh** | Handles bot detection automatically (~15 seconds) |
+| 🔐 **Chrome Session Sync** | Reuse your existing HEB login from Chrome — bypasses bot detection, no browser automation |
 
 ---
 
 ## 📦 Installation
 
-### Quick Start
+### Quick Start (Recommended) 🚀
 
 ```bash
 pip install texas-grocery-mcp
 ```
 
-### Full Installation (Recommended) 🚀
+That's all you need for the recommended auth path: **sync your HEB session
+straight from Google Chrome** (see [Session Management](#-session-management)).
+No browser automation, no Playwright, no stored password.
+
+**Prerequisites for Chrome sync:**
+- Google Chrome installed, with a profile **logged into [heb.com](https://www.heb.com)**
+- macOS or Linux (cookie decryption uses the OS keystore)
+- On macOS: allow access to the **"Chrome Safe Storage"** Keychain entry when
+  first prompted
+
+### Optional: embedded-browser fallback
+
+If you are *not* logged into HEB in Chrome and want the MCP to drive a login
+itself, install the browser extra:
 
 ```bash
 pip install texas-grocery-mcp[browser]
 playwright install chromium
 ```
 
-This enables **fast auto-refresh** (~15 seconds) using an embedded browser.
-
-### Prerequisites
-
-For cart operations and session management, you'll also need **Playwright MCP**:
-
-```bash
-npm install -g @anthropic-ai/mcp-playwright
-```
+This enables the `session_refresh` fallback. Note: HEB's WAF blocks *headless*
+browsers, so `session_refresh` only works in visible mode (`headless=False`)
+and still requires you to complete the login by hand. **Chrome sync is faster
+and more reliable** — prefer it.
 
 ---
 
@@ -61,10 +69,6 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 ```json
 {
   "mcpServers": {
-    "playwright": {
-      "command": "npx",
-      "args": ["@anthropic-ai/mcp-playwright"]
-    },
     "heb": {
       "command": "uvx",
       "args": ["texas-grocery-mcp"],
@@ -75,6 +79,10 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
   }
 }
 ```
+
+> Set `HEB_DEFAULT_STORE` to your store ID so `product_search` returns prices
+> without an explicit `store_id`. The `playwright` MCP server is only needed if
+> you use the optional embedded-browser fallback.
 
 ### Environment Variables
 
@@ -148,26 +156,55 @@ Agent uses: coupon_clip(coupon_id="ABC123", confirm=true)
 
 ## 🔐 Session Management
 
-HEB uses bot detection that expires every ~11 minutes. This MCP handles it automatically!
+HEB protects its site with Imperva's WAF (the `reese84` bot-detection token),
+which **blocks headless browsers**. The reliable way to authenticate is to reuse
+the session you already have in Chrome.
 
-### ⚡ Fast Auto-Refresh (Recommended)
+### ⭐ Chrome Session Sync (Recommended)
 
-With `[browser]` support installed:
-
-```
-Agent uses: session_refresh()
-# ✅ Completes in ~10-15 seconds
-```
-
-### 🔑 Auto-Login
-
-Save your credentials once for automatic login:
+Log into [heb.com](https://www.heb.com) in Google Chrome once, then:
 
 ```
-Agent uses: session_save_credentials(email="you@email.com", password="...")
-# Credentials stored securely in system keyring
-# Future session refreshes will auto-login!
+Agent uses: session_sync_from_chrome()
+# Reads + decrypts your HEB cookies from Chrome and writes them to the auth file.
+# ✅ session_status now shows authenticated: true
 ```
+
+How it works: it reads Chrome's cookie database, decrypts it with the key from
+your OS keystore (macOS Keychain / Linux Secret Service), and stores the HEB
+cookies for the MCP. The synced `reese84` token is accepted by HEB's WAF when
+replayed, so product, cart, and coupon tools work immediately — **no browser
+window opens and no login flow runs.**
+
+**Multiple Chrome profiles?** Call it once with no arguments to auto-detect the
+profile that's logged into HEB. If the wrong account is picked, pass a profile
+name (either the display name or the directory name):
+
+```
+Agent uses: session_sync_from_chrome(profile="Profile 1")
+# or:        session_sync_from_chrome(profile="Your Profile Display Name")
+```
+
+The result's `profiles` field lists the available profiles if you're unsure.
+
+**macOS note:** the first sync may trigger a one-time Keychain prompt to allow
+reading "Chrome Safe Storage" — click **Allow**.
+
+**Re-syncing:** cookies last a long time (the `reese84` token is good for weeks),
+but if `session_status` ever reports `needs_refresh: true`, just run
+`session_sync_from_chrome()` again.
+
+### 🧭 Fallback: embedded browser
+
+If you can't use Chrome sync, and you installed the `[browser]` extra:
+
+```
+Agent uses: session_refresh(headless=False)
+# Opens a visible browser; complete the HEB login by hand, then tell the agent "done".
+```
+
+Headless mode (`session_refresh()`) is blocked by HEB's WAF and will return an
+HTTP 401 — use `headless=False` or, better, Chrome sync.
 
 ---
 
@@ -207,9 +244,10 @@ Agent uses: session_save_credentials(email="you@email.com", password="...")
 ### 🔐 Session Tools
 | Tool | Description |
 |------|-------------|
+| `session_sync_from_chrome` | **Sync your HEB login from Chrome (recommended)** |
 | `session_status` | Check session health |
-| `session_refresh` | Refresh/login session |
-| `session_save_credentials` | Save credentials for auto-login |
+| `session_refresh` | Refresh/login via embedded browser (fallback) |
+| `session_save_credentials` | Save credentials for auto-login (fallback) |
 | `session_clear` | Logout |
 
 ---
@@ -257,14 +295,15 @@ docker-compose up --build
 │                    User's MCP Environment                    │
 │                                                             │
 │  ┌─────────────────────┐    ┌─────────────────────────────┐ │
-│  │  🎭 Playwright MCP  │    │   🛒 Texas Grocery MCP      │ │
-│  │  (Browser Auth)     │───▶│   (Grocery Logic)           │ │
+│  │  🔐 Google Chrome   │    │   🛒 Texas Grocery MCP      │ │
+│  │  (your HEB login)   │    │   (Grocery Logic)           │ │
+│  │   Cookies (SQLite)  │───▶│   session_sync_from_chrome  │ │
 │  └─────────────────────┘    └─────────────────────────────┘ │
-│                                        │                     │
+│        decrypt via OS keystore         │                     │
 └────────────────────────────────────────┼─────────────────────┘
-                                         │
+                                         │ cookies replayed via httpx
                                          ▼
-                                   🌐 HEB GraphQL API
+                              🌐 HEB GraphQL / SSR API
 ```
 
 ---

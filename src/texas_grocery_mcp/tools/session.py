@@ -1,5 +1,6 @@
 """Session management tools for MCP."""
 
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -13,12 +14,18 @@ from texas_grocery_mcp.auth.browser_refresh import (
     is_playwright_available,
     refresh_session_with_browser,
 )
+from texas_grocery_mcp.auth.chrome_cookies import (
+    ChromeCookieError,
+    extract_heb_cookies,
+    list_profiles,
+)
 from texas_grocery_mcp.auth.credentials import CredentialError, CredentialStore
 from texas_grocery_mcp.auth.session import (
     check_session_freshness,
     get_session_info,
     get_session_status,
     is_authenticated,
+    save_browser_cookies,
 )
 from texas_grocery_mcp.utils.config import get_settings
 
@@ -68,6 +75,106 @@ async def session_status() -> dict[str, Any]:
         # Credential storage info
         "credentials_stored": cred_info["credentials_stored"],
         "credential_storage_method": cred_info["storage_method"],
+    }
+
+
+async def session_sync_from_chrome(profile: str | None = None) -> dict[str, Any]:
+    """Sync your HEB session by extracting cookies from your real Chrome browser.
+
+    This is the recommended way to authenticate. It reads the cookies you
+    already have from being logged into heb.com in Chrome, decrypts them using
+    the OS keystore, and writes them to the MCP's auth file. No browser
+    automation, no login flow, and it bypasses the bot-detection (Imperva/WAF)
+    that blocks the headless ``session_refresh`` path.
+
+    Prerequisites:
+    - Google Chrome installed with a profile logged into heb.com
+    - On macOS, the process must be allowed to read the "Chrome Safe Storage"
+      Keychain entry (you may get a one-time Keychain prompt)
+
+    Args:
+        profile: Optional Chrome profile to read from. Accepts either the
+            display name (e.g. ``"Martín - personal"``) or the directory name
+            (e.g. ``"Profile 1"``). When omitted, the profile that is logged
+            into heb.com is auto-detected. Call with no args first; if the wrong
+            account is picked, re-run with an explicit profile. Use the
+            ``profiles`` field in the error/result to see available profiles.
+
+    Returns:
+        dict with success status, the profile used, cookie counts, and the
+        resulting session status (authenticated / reese84_present / etc.).
+    """
+    settings = get_settings()
+    auth_path = Path(settings.auth_state_path).expanduser()
+
+    try:
+        cookies, profile_dir = extract_heb_cookies(profile)
+    except ChromeCookieError as e:
+        profiles = []
+        with suppress(Exception):
+            profiles = list_profiles()
+        return {
+            "success": False,
+            "status": "failed",
+            "error": str(e),
+            "error_type": "chrome_extraction_failed",
+            "profiles": profiles,
+            "suggestion": (
+                "Ensure Chrome is installed and logged into heb.com. On macOS, "
+                "allow access to the 'Chrome Safe Storage' Keychain entry when "
+                "prompted. You can also pass an explicit profile name."
+            ),
+        }
+
+    if not save_browser_cookies(cookies):
+        return {
+            "success": False,
+            "status": "failed",
+            "error": "Failed to write the auth file.",
+            "error_type": "write_failed",
+            "auth_path": str(auth_path),
+        }
+
+    # Report resulting status so the caller knows the session is usable.
+    status = get_session_status()
+    reese84_cookie_present = any(
+        c.get("name") == "reese84" and "heb.com" in c.get("domain", "")
+        for c in cookies
+    )
+    session_cookie_present = any(
+        c.get("name") in ("sat", "DYN_USER_ID") for c in cookies
+    )
+
+    logger.info(
+        "Synced HEB session from Chrome",
+        profile=profile_dir,
+        cookies=len(cookies),
+        authenticated=status["authenticated"],
+    )
+
+    return {
+        "success": True,
+        "status": "success",
+        "message": (
+            f"Synced {len(cookies)} HEB cookies from Chrome profile "
+            f"'{profile_dir}'."
+        ),
+        "profile": profile_dir,
+        "cookies_count": len(cookies),
+        "reese84_present": status["reese84_present"] or reese84_cookie_present,
+        "session_cookie_present": session_cookie_present,
+        "authenticated": status["authenticated"],
+        "auth_path": str(auth_path),
+        "session_status": dict(status),
+        "next_step": (
+            "Session ready. Use product_search for prices, or cart/coupon tools."
+            if status["authenticated"]
+            else (
+                "Cookies were synced but the session does not look authenticated. "
+                "Make sure you are logged into heb.com in the selected Chrome "
+                "profile, then re-run. To target a specific profile, pass its name."
+            )
+        ),
     }
 
 
